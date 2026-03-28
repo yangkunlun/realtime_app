@@ -104,7 +104,7 @@ func realtimeAPIOutputAudio(ctx context.Context, conn *websocket.Conn) {
 					_ = chatTTSText(conn, msg.SessionID, &ChatTTSTextPayload{
 						Start:   true,
 						End:     false,
-						Content: "我查查",
+						Content: "",
 					})
 					_ = chatTTSText(conn, msg.SessionID, &ChatTTSTextPayload{
 						Start:   false,
