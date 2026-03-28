@@ -34,7 +34,7 @@ var (
 
 	// Web 模式
 	webMode = flag.Bool("web", false, "Start web server mode instead of CLI")
-	webAddr = flag.String("addr", ":8080", "Web server listen address (used with -web)")
+	webAddr = flag.String("addr", ":6003", "Web server listen address (used with -web)")
 
 	// 提示词
 	systemRolePrompt = `你现在是张姐，性格热情外向，扮演一位真实的客户角色。
