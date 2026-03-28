@@ -242,6 +242,52 @@ func (s *WebSession) apiFinishConnection() {
 	}
 }
 
+// --- Text forwarding ---
+
+func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
+	var data map[string]interface{}
+	if json.Unmarshal(payload, &data) != nil {
+		return
+	}
+
+	// Extract text from common API fields
+	text := ""
+	if t, ok := data["text"].(string); ok && t != "" {
+		text = t
+	}
+	if t, ok := data["content"].(string); ok && t != "" {
+		text = t
+	}
+	if t, ok := data["result"].(string); ok && t != "" {
+		text = t
+	}
+	if text == "" {
+		if nested, ok := data["data"].(map[string]interface{}); ok {
+			if t, ok := nested["text"].(string); ok {
+				text = t
+			}
+		}
+	}
+	if text == "" {
+		return
+	}
+
+	role := "ai"
+	switch event {
+	case 450, 459:
+		role = "user"
+	case 350:
+		role = "ai"
+	}
+
+	msg, _ := json.Marshal(map[string]string{
+		"type": "chat",
+		"role": role,
+		"text": text,
+	})
+	s.browserConn.WriteMessage(websocket.TextMessage, msg)
+}
+
 // --- Read loop from API ---
 
 func (s *WebSession) readAPILoop(ctx context.Context) {

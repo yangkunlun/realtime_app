@@ -40,14 +40,35 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
 #call-btn.start:hover:not(:disabled) { background: #16a34a; }
 #call-btn.stop { background: #ef4444; color: #fff; }
 #call-btn.stop:hover:not(:disabled) { background: #dc2626; }
-#log {
-  margin-top: 20px; padding: 12px; border-radius: 8px;
-  background: #1e293b; max-height: 300px; overflow-y: auto;
-  font-size: 0.85rem; line-height: 1.6; color: #94a3b8;
+#chat {
+  margin-top: 20px; padding: 16px; border-radius: 8px;
+  background: #1e293b; min-height: 200px; max-height: 400px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
 }
-#log .event { color: #60a5fa; }
-#log .error { color: #f87171; }
-#log .info { color: #4ade80; }
+.msg {
+  max-width: 80%; padding: 10px 14px; border-radius: 12px;
+  font-size: 0.9rem; line-height: 1.5; word-break: break-word;
+}
+.msg.ai {
+  align-self: flex-start;
+  background: #334155; color: #e2e8f0;
+  border-bottom-left-radius: 4px;
+}
+.msg.user {
+  align-self: flex-end;
+  background: #1d4ed8; color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.msg-label {
+  font-size: 0.7rem; color: #64748b; margin-bottom: 2px;
+}
+.msg.ai .msg-label { color: #94a3b8; }
+.msg.user .msg-label { color: #93c5fd; }
+.msg.system {
+  align-self: center;
+  background: transparent; color: #64748b;
+  font-size: 0.8rem; text-align: center;
+}
 </style>
 </head>
 <body>
@@ -58,11 +79,11 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
     <span id="status-text">Disconnected</span>
   </div>
   <button id="call-btn" class="start" disabled>Start Call</button>
-  <div id="log"></div>
+  <div id="chat"></div>
 </div>
 
 <script>
-const PLAYBACK_BUFFER_SIZE = 24000 * 3; // 3 seconds at 24kHz
+const PLAYBACK_BUFFER_SIZE = 24000 * 3;
 let ws = null;
 let audioContext = null;
 let micStream = null;
@@ -71,16 +92,14 @@ let playbackContext = null;
 let playbackProcessor = null;
 let isCalling = false;
 
-// Playback ring buffer
 let pbBuffer = new Int16Array(PLAYBACK_BUFFER_SIZE);
 let pbWritePos = 0;
 let pbReadPos = 0;
 
-// DOM
 const callBtn = document.getElementById('call-btn');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
-const logEl = document.getElementById('log');
+const chatEl = document.getElementById('chat');
 
 // --- WebSocket ---
 function connect() {
@@ -99,11 +118,11 @@ function handleMessage(event) {
     const type = view.getUint8(0);
     const data = event.data.slice(1);
     if (type === 0x01) enqueueAudio(new Int16Array(data));
-    else if (type === 0x02) addLog(JSON.parse(new TextDecoder().decode(data)).text || '', 'event');
   } else {
     const msg = JSON.parse(event.data);
     if (msg.type === 'status') setStatus(msg.status, msg.message);
     if (msg.type === 'audio_info') initPlayback();
+    if (msg.type === 'chat') addChat(msg.role, msg.text);
   }
 }
 
@@ -122,6 +141,28 @@ function setStatus(status, text) {
   } else {
     callBtn.disabled = true;
   }
+}
+
+// --- Chat display ---
+function addChat(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  const label = document.createElement('div');
+  label.className = 'msg-label';
+  label.textContent = role === 'user' ? 'You' : 'Zhang Jie';
+  const body = document.createElement('div');
+  body.textContent = text;
+  div.appendChild(label);
+  div.appendChild(body);
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function addSystem(text) {
+  const div = document.createElement('div');
+  div.className = 'msg system';
+  div.textContent = text;
+  chatEl.appendChild(div);
 }
 
 // --- Call control ---
@@ -147,9 +188,9 @@ async function startCall() {
     source.connect(processor);
     processor.connect(audioContext.destination);
     ws.send(JSON.stringify({ type: 'start' }));
-    addLog('Call started', 'info');
+    addSystem('--- Call started ---');
   } catch (err) {
-    addLog('Mic error: ' + err.message, 'error');
+    addSystem('Mic error: ' + err.message);
     stopCall();
   }
 }
@@ -162,7 +203,7 @@ function stopCall() {
   if (processor) { processor.disconnect(); processor = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (audioContext) { audioContext.close(); audioContext = null; }
-  addLog('Call ended', 'info');
+  addSystem('--- Call ended ---');
 }
 
 // --- Playback ---
@@ -201,15 +242,6 @@ function float32ToInt16(float32) {
     int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
   }
   return int16;
-}
-
-// --- Log ---
-function addLog(text, cls) {
-  const div = document.createElement('div');
-  div.className = cls || '';
-  div.textContent = text;
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
 }
 
 // --- Init ---
