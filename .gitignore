@@ -1,0 +1,8 @@
+# Binary
+RealtimeDialog
+
+# Audio output
+*.pcm
+
+# Go
+vendor/
