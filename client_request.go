@@ -307,13 +307,8 @@ func sendAudio(ctx context.Context, c *websocket.Conn, sessionID string) {
 			FramesPerBuffer: 160,
 		}
 
-		// sayhello后模拟chatTextQuery
+		// 等待sayhello完成后再开始录音
 		<-sayhelloOver
-		time.Sleep(1 * time.Second)
-		err = chatTextQuery(c, sessionID, &ChatTextQueryPayload{Content: "你好，我是因势科技，有什么可以帮你？"})
-		if err != nil {
-			glog.Errorf("Failed to send chatTextQuery: %v", err)
-		}
 
 		stream, err := portaudio.OpenStream(streamParameters, func(in []int16) {
 			//glog.Infof("Sending audio: %v", in)
