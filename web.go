@@ -252,8 +252,7 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		return
 	}
 
-	// Event 451: ASR streaming result
-	// Text is in results[0].text, only show final result (is_interim: false)
+	// Event 451: ASR streaming - only show final result
 	if event == 451 {
 		isInterim := true
 		if v, ok := data["is_interim"].(bool); ok {
@@ -273,28 +272,24 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		return
 	}
 
-	// Event 350: TTS start (may contain initial text)
-	if event == 350 {
-		s.aiTextBuf.Reset()
-		if t, ok := data["text"].(string); ok && t != "" {
-			s.aiTextBuf.WriteString(t)
-		}
-		return
+	// All other events: extract text and accumulate for AI response
+	text := ""
+	if t, ok := data["text"].(string); ok {
+		text = t
+	} else if t, ok := data["content"].(string); ok {
+		text = t
+	}
+	if text != "" {
+		s.aiTextBuf.WriteString(text)
 	}
 
-	// Event 351: TTS end - flush accumulated AI text
-	if event == 351 {
+	// Flush accumulated text on TTS end or session end
+	if event == 351 || event == 459 {
 		text := s.aiTextBuf.String()
 		s.aiTextBuf.Reset()
 		if text != "" {
 			s.sendChat("ai", text)
 		}
-		return
-	}
-
-	// For other events with top-level text field, accumulate for AI response
-	if text, ok := data["text"].(string); ok && text != "" {
-		s.aiTextBuf.WriteString(text)
 	}
 }
 
