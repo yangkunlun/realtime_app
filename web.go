@@ -255,21 +255,36 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 	// Event 451: ASR streaming - only show final result
 	if event == 451 {
 		isInterim := true
+		var asrText string
+		if results, ok := data["results"].([]interface{}); ok && len(results) > 0 {
+			if r, ok := results[0].(map[string]interface{}); ok {
+				asrText, _ = r["text"].(string)
+				// Check is_interim inside results[0] first, then top level
+				if v, ok := r["is_interim"].(bool); ok {
+					isInterim = v
+				}
+			}
+		}
 		if v, ok := data["is_interim"].(bool); ok {
 			isInterim = v
 		}
-		if !isInterim {
-			text := ""
-			if results, ok := data["results"].([]interface{}); ok && len(results) > 0 {
-				if r, ok := results[0].(map[string]interface{}); ok {
-					text, _ = r["text"].(string)
-				}
+		glog.Infof("ASR 451: is_interim=%v text=%q", isInterim, asrText)
+		if !isInterim && asrText != "" {
+			// If AI text is being accumulated (TTS in progress), flush it first
+			// so user text appears before AI response
+			if s.aiTextBuf.Len() > 0 {
+				aiText := s.aiTextBuf.String()
+				s.aiTextBuf.Reset()
+				s.sendChat("ai", aiText)
 			}
-			if text != "" {
-				s.sendChat("user", text)
-			}
+			s.sendChat("user", asrText)
 		}
 		return
+	}
+
+	// Event 350: TTS start - reset buffer for new TTS segment
+	if event == 350 {
+		s.aiTextBuf.Reset()
 	}
 
 	// All other events: extract text and accumulate for AI response
