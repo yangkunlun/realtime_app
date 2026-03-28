@@ -243,15 +243,8 @@ func (s *WebSession) apiFinishConnection() {
 		return
 	}
 	_ = s.sendFullToAPI(2, "", []byte("{}"))
-	// Best effort read of ConnectionFinished
-	s.apiConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	mt, frame, err := s.apiConn.ReadMessage()
-	if err == nil && (mt == websocket.BinaryMessage || mt == websocket.TextMessage) {
-		msg, _, uerr := Unmarshal(frame, ContainsSequence)
-		if uerr == nil {
-			glog.Infof("API connection finished (event=%d)", msg.Event)
-		}
-	}
+	s.apiConn.Close()
+	s.apiConn = nil
 }
 
 // --- Text forwarding ---
@@ -313,6 +306,7 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 			s.curAIBuf = nil
 		}
 		s.segMu.Unlock()
+		return // don't accumulate text from this event
 	}
 
 	// All other events: extract text and accumulate for AI response
@@ -342,6 +336,7 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 			s.curAIBuf = nil
 		}
 		s.segMu.Unlock()
+		return // don't accumulate text from this event
 	}
 }
 
@@ -544,6 +539,12 @@ func (s *WebSession) saveRecording() {
 		glog.Errorf("Save WAV: %v", err)
 	} else {
 		glog.Infof("Saved WAV: %s (%d segments, %d bytes)", filename, len(segments), len(combined))
+		// Notify browser with recording file path
+		recMsg, _ := json.Marshal(map[string]string{
+			"type":     "recording",
+			"filename": filename,
+		})
+		s.browserConn.WriteMessage(websocket.TextMessage, recMsg)
 	}
 }
 
@@ -741,6 +742,7 @@ func StartWebServer(addr string) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(staticContent)))
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 	mux.HandleFunc("/ws", handleWebSocket)
 
 	glog.Infof("Starting web server on %s", addr)

@@ -30,8 +30,11 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+#btn-row {
+  display: flex; gap: 12px; margin-bottom: 20px;
+}
 #call-btn {
-  width: 100%; padding: 16px; border: none; border-radius: 12px;
+  flex: 1; padding: 16px; border: none; border-radius: 12px;
   font-size: 1.1rem; font-weight: 600; cursor: pointer;
   transition: all 0.2s;
 }
@@ -40,8 +43,16 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
 #call-btn.start:hover:not(:disabled) { background: #16a34a; }
 #call-btn.stop { background: #ef4444; color: #fff; }
 #call-btn.stop:hover:not(:disabled) { background: #dc2626; }
+#replay-btn {
+  width: 100%; padding: 14px; border: none; border-radius: 12px;
+  background: #1e293b; color: #94a3b8; font-size: 1rem;
+  cursor: pointer; transition: all 0.2s; margin-top: 12px;
+}
+#replay-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+#replay-btn:hover:not(:disabled) { background: #334155; color: #e2e8f0; }
+#replay-btn.playing { background: #f59e0b; color: #fff; }
 #chat {
-  margin-top: 20px; padding: 16px; border-radius: 8px;
+  margin-top: 0; padding: 16px; border-radius: 8px;
   background: #1e293b; min-height: 200px; max-height: 400px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px;
 }
@@ -78,8 +89,11 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
     <div id="status-dot"></div>
     <span id="status-text">Disconnected</span>
   </div>
-  <button id="call-btn" class="start" disabled>Start Call</button>
+  <div id="btn-row">
+    <button id="call-btn" class="start" disabled>Start Call</button>
+  </div>
   <div id="chat"></div>
+  <button id="replay-btn" disabled>回放</button>
 </div>
 
 <script>
@@ -91,12 +105,16 @@ let processor = null;
 let playbackContext = null;
 let playbackProcessor = null;
 let isCalling = false;
+let recordingUrl = null;
+let replayAudio = null;
+let isReplaying = false;
 
 let pbBuffer = new Int16Array(PLAYBACK_BUFFER_SIZE);
 let pbWritePos = 0;
 let pbReadPos = 0;
 
 const callBtn = document.getElementById('call-btn');
+const replayBtn = document.getElementById('replay-btn');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 const chatEl = document.getElementById('chat');
@@ -123,6 +141,11 @@ function handleMessage(event) {
     if (msg.type === 'status') setStatus(msg.status, msg.message);
     if (msg.type === 'audio_info') initPlayback();
     if (msg.type === 'chat') addChat(msg.role, msg.text);
+    if (msg.type === 'recording') {
+      recordingUrl = '/' + msg.filename;
+      replayBtn.disabled = false;
+      addSystem('Recording saved');
+    }
   }
 }
 
@@ -163,6 +186,7 @@ function addSystem(text) {
   div.className = 'msg system';
   div.textContent = text;
   chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
 }
 
 // --- Call control ---
@@ -173,6 +197,8 @@ callBtn.addEventListener('click', () => {
 
 async function startCall() {
   isCalling = true;
+  recordingUrl = null;
+  replayBtn.disabled = true;
   try {
     audioContext = new AudioContext({ sampleRate: 16000 });
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -206,7 +232,43 @@ function stopCall() {
   addSystem('--- Call ended ---');
 }
 
-// --- Playback ---
+// --- Replay recording ---
+replayBtn.addEventListener('click', () => {
+  if (!recordingUrl) return;
+  if (isReplaying) {
+    stopReplay();
+  } else {
+    startReplay();
+  }
+});
+
+function startReplay() {
+  if (!playbackContext) {
+    playbackContext = new AudioContext({ sampleRate: 24000 });
+  }
+  if (playbackContext.state === 'suspended') playbackContext.resume();
+
+  replayAudio = new Audio(recordingUrl);
+  replayAudio.onended = () => stopReplay();
+  replayAudio.play();
+  isReplaying = true;
+  replayBtn.classList.add('playing');
+  replayBtn.innerHTML = '&#9646;&#9646;';
+  addSystem('--- Playing recording ---');
+}
+
+function stopReplay() {
+  if (replayAudio) {
+    replayAudio.pause();
+    replayAudio.currentTime = 0;
+    replayAudio = null;
+  }
+  isReplaying = false;
+  replayBtn.classList.remove('playing');
+  replayBtn.innerHTML = '&#9654;';
+}
+
+// --- Live playback ---
 function initPlayback() {
   if (playbackContext) return;
   playbackContext = new AudioContext({ sampleRate: 24000 });
