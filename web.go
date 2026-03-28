@@ -332,7 +332,7 @@ func (s *WebSession) readAPILoop(ctx context.Context) {
 			glog.Infof("API event=%d session=%s: %s", msg.Event, msg.SessionID, msg.Payload)
 
 			// Forward text events to browser for display
-			s.sendEventToBrowser(msg.Payload)
+			s.forwardTextEvent(msg.Event, msg.Payload)
 
 			if msg.Event == 150 {
 				var data map[string]interface{}
