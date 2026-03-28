@@ -123,6 +123,7 @@ function handleMessage(event) {
     if (msg.type === 'status') setStatus(msg.status, msg.message);
     if (msg.type === 'audio_info') initPlayback();
     if (msg.type === 'chat') addChat(msg.role, msg.text);
+    if (msg.type === 'debug') addDebug(msg.event, msg.data);
   }
 }
 
@@ -163,6 +164,16 @@ function addSystem(text) {
   div.className = 'msg system';
   div.textContent = text;
   chatEl.appendChild(div);
+}
+
+function addDebug(event, data) {
+  const div = document.createElement('div');
+  div.className = 'msg system';
+  div.textContent = `[event ${event}] ${JSON.stringify(data)}`;
+  div.style.fontSize = '0.75rem';
+  div.style.color = '#fbbf24';
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
 }
 
 // --- Call control ---

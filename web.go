@@ -250,26 +250,19 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		return
 	}
 
-	// Extract text from common API fields
-	text := ""
-	if t, ok := data["text"].(string); ok && t != "" {
-		text = t
-	}
-	if t, ok := data["content"].(string); ok && t != "" {
-		text = t
-	}
-	if t, ok := data["result"].(string); ok && t != "" {
-		text = t
-	}
+	// Try to extract text from various possible API field names
+	text := extractString(data, "text", "content", "result", "msg",
+		"asr_text", "tts_text", "value")
 	if text == "" {
-		if nested, ok := data["data"].(map[string]interface{}); ok {
-			if t, ok := nested["text"].(string); ok {
-				text = t
+		// Try nested: data.text, result.text, etc.
+		for _, key := range []string{"data", "result", "payload"} {
+			if nested, ok := data[key].(map[string]interface{}); ok {
+				text = extractString(nested, "text", "content", "msg", "value")
+				if text != "" {
+					break
+				}
 			}
 		}
-	}
-	if text == "" {
-		return
 	}
 
 	role := "ai"
@@ -280,12 +273,32 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		role = "ai"
 	}
 
-	msg, _ := json.Marshal(map[string]string{
-		"type": "chat",
-		"role": role,
-		"text": text,
-	})
-	s.browserConn.WriteMessage(websocket.TextMessage, msg)
+	if text != "" {
+		msg, _ := json.Marshal(map[string]string{
+			"type": "chat",
+			"role": role,
+			"text": text,
+		})
+		s.browserConn.WriteMessage(websocket.TextMessage, msg)
+	} else {
+		// Fallback: send raw payload so we can see the actual API structure
+		glog.Infof("No text extracted from event %d, payload: %s", event, string(payload))
+		msg, _ := json.Marshal(map[string]interface{}{
+			"type":  "debug",
+			"event": event,
+			"data":  data,
+		})
+		s.browserConn.WriteMessage(websocket.TextMessage, msg)
+	}
+}
+
+func extractString(m map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // --- Read loop from API ---
