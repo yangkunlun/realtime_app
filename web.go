@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"strings"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -37,6 +38,7 @@ type WebSession struct {
 	audioData   []byte
 	audioLock   sync.Mutex
 	ready       chan struct{}
+	aiTextBuf   strings.Builder
 }
 
 func newWebSession(browserConn *websocket.Conn) *WebSession {
@@ -250,55 +252,59 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		return
 	}
 
-	// Try to extract text from various possible API field names
-	text := extractString(data, "text", "content", "result", "msg",
-		"asr_text", "tts_text", "value")
-	if text == "" {
-		// Try nested: data.text, result.text, etc.
-		for _, key := range []string{"data", "result", "payload"} {
-			if nested, ok := data[key].(map[string]interface{}); ok {
-				text = extractString(nested, "text", "content", "msg", "value")
-				if text != "" {
-					break
+	// Event 451: ASR streaming result
+	// Text is in results[0].text, only show final result (is_interim: false)
+	if event == 451 {
+		isInterim := true
+		if v, ok := data["is_interim"].(bool); ok {
+			isInterim = v
+		}
+		if !isInterim {
+			text := ""
+			if results, ok := data["results"].([]interface{}); ok && len(results) > 0 {
+				if r, ok := results[0].(map[string]interface{}); ok {
+					text, _ = r["text"].(string)
 				}
 			}
+			if text != "" {
+				s.sendChat("user", text)
+			}
 		}
+		return
 	}
 
-	role := "ai"
-	switch event {
-	case 450, 459:
-		role = "user"
-	case 350:
-		role = "ai"
+	// Event 350: TTS start (may contain initial text)
+	if event == 350 {
+		s.aiTextBuf.Reset()
+		if t, ok := data["text"].(string); ok && t != "" {
+			s.aiTextBuf.WriteString(t)
+		}
+		return
 	}
 
-	if text != "" {
-		msg, _ := json.Marshal(map[string]string{
-			"type": "chat",
-			"role": role,
-			"text": text,
-		})
-		s.browserConn.WriteMessage(websocket.TextMessage, msg)
-	} else {
-		// Fallback: send raw payload so we can see the actual API structure
-		glog.Infof("No text extracted from event %d, payload: %s", event, string(payload))
-		msg, _ := json.Marshal(map[string]interface{}{
-			"type":  "debug",
-			"event": event,
-			"data":  data,
-		})
-		s.browserConn.WriteMessage(websocket.TextMessage, msg)
+	// Event 351: TTS end - flush accumulated AI text
+	if event == 351 {
+		text := s.aiTextBuf.String()
+		s.aiTextBuf.Reset()
+		if text != "" {
+			s.sendChat("ai", text)
+		}
+		return
+	}
+
+	// For other events with top-level text field, accumulate for AI response
+	if text, ok := data["text"].(string); ok && text != "" {
+		s.aiTextBuf.WriteString(text)
 	}
 }
 
-func extractString(m map[string]interface{}, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok && v != "" {
-			return v
-		}
-	}
-	return ""
+func (s *WebSession) sendChat(role, text string) {
+	msg, _ := json.Marshal(map[string]string{
+		"type": "chat",
+		"role": role,
+		"text": text,
+	})
+	s.browserConn.WriteMessage(websocket.TextMessage, msg)
 }
 
 // --- Read loop from API ---
@@ -388,6 +394,7 @@ func (s *WebSession) startCall() {
 	s.cancel = cancel
 	s.sessionID = uuid.New().String()
 	s.audioData = nil
+	s.aiTextBuf.Reset()
 	s.ready = make(chan struct{})
 
 	if err := s.dialAPI(ctx); err != nil {
