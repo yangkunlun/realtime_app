@@ -25,6 +25,12 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// audioSegment represents one turn of audio (user or AI).
+type audioSegment struct {
+	role string // "user" or "ai"
+	data []byte // raw S16LE PCM
+}
+
 // WebSession manages a single browser <-> Volcano Engine proxy session.
 type WebSession struct {
 	browserConn *websocket.Conn
@@ -35,10 +41,14 @@ type WebSession struct {
 	sessionID   string
 	dialogID    string
 	cancel      context.CancelFunc
-	audioData   []byte
-	audioLock   sync.Mutex
 	ready       chan struct{}
 	aiTextBuf   strings.Builder
+	// Audio recording: interleaved segments in conversation order
+	segMu              sync.Mutex
+	segments           []audioSegment
+	curUserBuf         []byte // accumulating user audio for current turn
+	curAIBuf           []byte // accumulating AI audio for current TTS turn
+	userRecStarted     atomic.Bool // only record user audio after ASR detects speech
 }
 
 func newWebSession(browserConn *websocket.Conn) *WebSession {
@@ -268,23 +278,41 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		if v, ok := data["is_interim"].(bool); ok {
 			isInterim = v
 		}
+		// Start recording user audio from the first ASR detection
+		s.userRecStarted.Store(true)
 		glog.Infof("ASR 451: is_interim=%v text=%q", isInterim, asrText)
 		if !isInterim && asrText != "" {
 			// If AI text is being accumulated (TTS in progress), flush it first
-			// so user text appears before AI response
 			if s.aiTextBuf.Len() > 0 {
 				aiText := s.aiTextBuf.String()
 				s.aiTextBuf.Reset()
 				s.sendChat("ai", aiText)
 			}
 			s.sendChat("user", asrText)
+			// Save user audio segment (ASR final = end of user turn)
+			s.segMu.Lock()
+			if len(s.curUserBuf) > 0 {
+				buf := make([]byte, len(s.curUserBuf))
+				copy(buf, s.curUserBuf)
+				s.segments = append(s.segments, audioSegment{role: "user", data: buf})
+				s.curUserBuf = nil
+			}
+			s.segMu.Unlock()
 		}
 		return
 	}
 
-	// Event 350: TTS start - reset buffer for new TTS segment
+	// Event 350: TTS start - save any pending AI audio as a segment, start new one
 	if event == 350 {
 		s.aiTextBuf.Reset()
+		s.segMu.Lock()
+		if len(s.curAIBuf) > 0 {
+			buf := make([]byte, len(s.curAIBuf))
+			copy(buf, s.curAIBuf)
+			s.segments = append(s.segments, audioSegment{role: "ai", data: buf})
+			s.curAIBuf = nil
+		}
+		s.segMu.Unlock()
 	}
 
 	// All other events: extract text and accumulate for AI response
@@ -305,6 +333,15 @@ func (s *WebSession) forwardTextEvent(event int32, payload []byte) {
 		if text != "" {
 			s.sendChat("ai", text)
 		}
+		// Save AI audio segment
+		s.segMu.Lock()
+		if len(s.curAIBuf) > 0 {
+			buf := make([]byte, len(s.curAIBuf))
+			copy(buf, s.curAIBuf)
+			s.segments = append(s.segments, audioSegment{role: "ai", data: buf})
+			s.curAIBuf = nil
+		}
+		s.segMu.Unlock()
 	}
 }
 
@@ -375,10 +412,10 @@ func (s *WebSession) readAPILoop(ctx context.Context) {
 			}
 
 		case MsgTypeAudioOnlyServer:
-			// Save audio for recording
-			s.audioLock.Lock()
-			s.audioData = append(s.audioData, msg.Payload...)
-			s.audioLock.Unlock()
+			// Accumulate AI audio for current TTS turn
+			s.segMu.Lock()
+			s.curAIBuf = append(s.curAIBuf, msg.Payload...)
+			s.segMu.Unlock()
 			// Forward to browser
 			s.sendAudioToBrowser(msg.Payload)
 
@@ -403,7 +440,10 @@ func (s *WebSession) startCall() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.sessionID = uuid.New().String()
-	s.audioData = nil
+	s.segments = nil
+	s.curUserBuf = nil
+	s.curAIBuf = nil
+	s.userRecStarted.Store(false)
 	s.aiTextBuf.Reset()
 	s.ready = make(chan struct{})
 
@@ -462,17 +502,171 @@ func (s *WebSession) finishCall() {
 }
 
 func (s *WebSession) saveRecording() {
-	s.audioLock.Lock()
-	defer s.audioLock.Unlock()
-	if len(s.audioData) == 0 {
+	s.segMu.Lock()
+	// Flush any remaining audio buffers as final segments
+	if len(s.curUserBuf) > 0 {
+		s.segments = append(s.segments, audioSegment{role: "user", data: s.curUserBuf})
+		s.curUserBuf = nil
+	}
+	if len(s.curAIBuf) > 0 {
+		s.segments = append(s.segments, audioSegment{role: "ai", data: s.curAIBuf})
+		s.curAIBuf = nil
+	}
+	segments := s.segments
+	s.segments = nil
+	s.segMu.Unlock()
+
+	if len(segments) == 0 {
+		glog.Info("No audio segments to save")
 		return
 	}
-	filename := fmt.Sprintf("web_output_%d.pcm", time.Now().UnixMilli())
-	if err := os.WriteFile(filename, s.audioData, 0644); err != nil {
-		glog.Errorf("Save recording: %v", err)
-	} else {
-		glog.Infof("Saved recording: %s (%d bytes)", filename, len(s.audioData))
+
+	// Concatenate segments in conversation order, trimming silence, resampling user to 24kHz
+	var combined []byte
+	for _, seg := range segments {
+		var pcm []byte
+		if seg.role == "user" {
+			trimmed := trimSilence(seg.data, 16000)
+			pcm = resampleS16LE(trimmed, 16000, 24000)
+		} else {
+			pcm = trimSilence(seg.data, 24000)
+		}
+		glog.Infof("Audio segment: role=%s, orig=%d bytes, trimmed=%d bytes",
+			seg.role, len(seg.data), len(pcm))
+		combined = append(combined, pcm...)
 	}
+
+	// Create uploads dir and write WAV
+	os.MkdirAll("uploads", 0755)
+	filename := fmt.Sprintf("uploads/recording_%d.wav", time.Now().UnixMilli())
+	wavData := encodeWAV(combined, 24000, 1, 16)
+	if err := os.WriteFile(filename, wavData, 0644); err != nil {
+		glog.Errorf("Save WAV: %v", err)
+	} else {
+		glog.Infof("Saved WAV: %s (%d segments, %d bytes)", filename, len(segments), len(combined))
+	}
+}
+
+// trimSilence removes leading and trailing silence from S16LE PCM audio.
+// Uses sliding window energy detection to handle mic noise.
+// Keeps 150ms padding on each side.
+func trimSilence(pcm []byte, sampleRate int) []byte {
+	if len(pcm) < 4 {
+		return pcm
+	}
+	samples := len(pcm) / 2
+	windowSize := sampleRate / 10 // 100ms window
+	if windowSize < 1 {
+		windowSize = 1
+	}
+	energyThreshold := int64(800) // energy threshold per window
+	padding := sampleRate * 15 / 100 // 150ms padding
+
+	// Build energy array using sliding window
+	energies := make([]int64, samples)
+	var windowSum int64
+	for i := 0; i < samples; i++ {
+		s := int32(int16(pcm[i*2]) | int16(pcm[i*2+1])<<8)
+		windowSum += int64(s * s)
+		if i >= windowSize {
+			s0 := int32(int16(pcm[(i-windowSize)*2]) | int16(pcm[(i-windowSize)*2+1])<<8)
+			windowSum -= int64(s0 * s0)
+		}
+		energies[i] = windowSum / int64(windowSize)
+	}
+
+	start := 0
+	for i := 0; i < samples; i++ {
+		if energies[i] > energyThreshold {
+			start = i - padding
+			if start < 0 {
+				start = 0
+			}
+			break
+		}
+	}
+
+	end := samples - 1
+	for i := samples - 1; i >= 0; i-- {
+		if energies[i] > energyThreshold {
+			end = i + padding
+			if end > samples {
+				end = samples
+			}
+			break
+		}
+	}
+
+	if start >= end {
+		return pcm
+	}
+	return pcm[start*2 : end*2]
+}
+
+// resampleS16LE resamples S16LE PCM audio from srcRate to dstRate using linear interpolation.
+func resampleS16LE(pcm []byte, srcRate, dstRate int) []byte {
+	if len(pcm) == 0 || srcRate == dstRate {
+		return pcm
+	}
+	srcSamples := len(pcm) / 2 // 2 bytes per S16LE sample
+	dstSamples := int(float64(srcSamples) * float64(dstRate) / float64(srcRate))
+	out := make([]int16, dstSamples)
+	ratio := float64(srcSamples-1) / float64(dstSamples-1)
+	for i := 0; i < dstSamples; i++ {
+		pos := float64(i) * ratio
+		idx := int(pos)
+		frac := pos - float64(idx)
+		if idx+1 < srcSamples {
+			s0 := int16(pcm[idx*2]) | int16(pcm[idx*2+1])<<8
+			s1 := int16(pcm[(idx+1)*2]) | int16(pcm[(idx+1)*2+1])<<8
+			out[i] = int16(float64(s0)*(1-frac) + float64(s1)*frac)
+		} else {
+			out[i] = int16(pcm[idx*2]) | int16(pcm[idx*2+1])<<8
+		}
+	}
+	result := make([]byte, len(out)*2)
+	for i, s := range out {
+		result[i*2] = byte(s)
+		result[i*2+1] = byte(s >> 8)
+	}
+	return result
+}
+
+// encodeWAV creates a WAV file header + PCM data.
+func encodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
+	dataSize := len(pcm)
+	fileSize := 36 + dataSize
+	buf := make([]byte, 44+dataSize)
+	// RIFF header
+	copy(buf[0:4], "RIFF")
+	writeLE32(buf[4:8], uint32(fileSize))
+	copy(buf[8:12], "WAVE")
+	// fmt chunk
+	copy(buf[12:16], "fmt ")
+	writeLE32(buf[16:20], 16)            // chunk size
+	writeLE16(buf[20:22], 1)             // PCM format
+	writeLE16(buf[22:24], uint16(channels))
+	writeLE32(buf[24:28], uint32(sampleRate))
+	writeLE32(buf[28:32], uint32(sampleRate*channels*bitsPerSample/8)) // byte rate
+	writeLE16(buf[32:34], uint16(channels*bitsPerSample/8))             // block align
+	writeLE16(buf[34:36], uint16(bitsPerSample))
+	// data chunk
+	copy(buf[36:40], "data")
+	writeLE32(buf[40:44], uint32(dataSize))
+	copy(buf[44:], pcm)
+	return buf
+}
+
+func writeLE32(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
+
+func writeLE16(b []byte, v uint16) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
 }
 
 func (s *WebSession) cleanup() {
@@ -521,6 +715,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case websocket.BinaryMessage:
+			// Only accumulate user audio after ASR detects speech
+			if session.userRecStarted.Load() {
+				session.segMu.Lock()
+				session.curUserBuf = append(session.curUserBuf, data...)
+				session.segMu.Unlock()
+			}
+			// Forward to API
 			if session.apiConn != nil && session.sessionID != "" {
 				if err := session.sendAudioToAPI(data); err != nil {
 					glog.Errorf("Forward audio to API: %v", err)
