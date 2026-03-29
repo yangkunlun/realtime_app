@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Realtime Voice Dialogue</title>
+<title>实时语音通话</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -84,13 +84,13 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; text-align: center; color: #f1f5f9;
 </head>
 <body>
 <div id="app">
-  <h1>Realtime Voice Dialogue</h1>
+  <h1>实时语音通话</h1>
   <div id="status-bar">
     <div id="status-dot"></div>
     <span id="status-text">Disconnected</span>
   </div>
   <div id="btn-row">
-    <button id="call-btn" class="start" disabled>Start Call</button>
+    <button id="call-btn" class="start" disabled>开始通话</button>
   </div>
   <div id="chat"></div>
   <button id="replay-btn" disabled>回放</button>
@@ -156,10 +156,10 @@ function setStatus(status, text) {
   if (status === 'connected') {
     callBtn.disabled = false;
     callBtn.className = 'start';
-    callBtn.textContent = 'Start Call';
+    callBtn.textContent = '开始通话';
   } else if (status === 'calling') {
     callBtn.className = 'stop';
-    callBtn.textContent = 'End Call';
+    callBtn.textContent = '结束通话';
     callBtn.disabled = false;
   } else {
     callBtn.disabled = true;

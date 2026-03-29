@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -745,8 +747,21 @@ func StartWebServer(addr string) {
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 	mux.HandleFunc("/ws", handleWebSocket)
 
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+		glog.Info("Shutting down web server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}()
+
 	glog.Infof("Starting web server on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		glog.Exitf("Web server error: %v", err)
 	}
+	glog.Info("Web server stopped")
 }
